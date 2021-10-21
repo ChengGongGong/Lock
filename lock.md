@@ -98,7 +98,7 @@ curator一个比较完善的ZooKeeper客户端框架，封装了一系列高级A
  
  4. 使用监听机制，减少线程上下文切换的次数；
 
-###缺点
+### 缺点
 
 1. 加锁会频繁地“写”zookeeper，增加zookeeper的压力；
 
@@ -108,3 +108,134 @@ curator一个比较完善的ZooKeeper客户端框架，封装了一系列高级A
 
 4. 相对于redis分布式锁，性能要稍微略差一些；
  
+# 2.基于redis的分布式锁
+
+## 2.1 基于redis单实例
+
+@Slf4j
+
+public class RedisLock {
+
+    private static final String LOCK_SUCCESS="ok";
+
+    private static final String UNLOCK_SUCCESS="1";
+
+    private static final int DEFAULT_EXPIRE = 5;
+
+    private static final String LOCK_PRE="lock:%s";
+
+    private static final String UNLOCK_LUA=  "if redis.call('get',KEYS[1]) == ARGV[1]) then" +
+                                             "return redis.call('del',KEYS[1])" +
+                                             "else" +
+                                             "return 0" +
+                                             "end";
+
+    @Autowired
+    private JedisCluster jedisCluster;
+
+    public boolean lock(String taskName,String value,int expireTime){
+        if(expireTime<0){
+            expireTime=DEFAULT_EXPIRE;
+        }
+        String lockKey=String.format(LOCK_PRE,taskName);
+        //使用set nx ex给当前线程设置一个唯一的随机数
+        try{
+            if(jedisCluster.set(lockKey, value, SetParams.setParams().nx().ex(expireTime)).equals(LOCK_SUCCESS)){
+                return true;
+            }
+        }catch (Exception e) {
+          log.error("redis lock failed,task:{}",taskName,e);
+        }
+
+        return false;
+    }
+
+    public boolean unLock(String taskName,String value){
+        String lockKey=String.format(LOCK_PRE,taskName);
+        try {
+            //使用lua脚本原子性的比较是不是当前线程加的锁和释放锁
+            String result=(String)jedisCluster.eval(UNLOCK_LUA, Collections.singletonList(lockKey),Collections.singletonList(value));
+            if(UNLOCK_SUCCESS.equals(result)){
+                return true;
+            }
+        }catch (Exception e) {
+            log.error("redis unLock failed,task:{}",taskName);
+        }
+
+        return false;
+    }
+}
+
+//存在的问题：
+
+1. redis集群模式下，会存在锁丢失的情况，当主节点挂掉时，主节点还没来得及同步到从节点，从节点升级为主节点，导致锁丢失；
+
+2. 锁超时自动续期问题，给锁设置的过期时间太短，业务还没执行完成，锁就过期了
+
+## 2.2 基于Redisson实现分布式锁-RedissonLock
+
+1. 加锁机制，对于redis集群，通过hash算法选择一个节点，并执行lua脚本加锁，默认过期时间30s；
+2. 锁互斥机制，不同的客户端执行相同的lua脚本，发现锁key的hash数据结构中field不是自己的线程id，则返回锁的剩余生存时间，并循环等待，不断尝试加锁。
+3. watch dog自动续期机制，某个线程加锁成功，就会启动一个看门狗的后台线程，每隔10s检查一次，如果该线程仍持有锁，就不断的延长锁key的生存时间
+4. 可重入机制，相同的客户端执行相同的lua脚本，发现锁key的hash数据结构中的filed是自己的线程id，则将value值加1
+5. 锁释放机制，执行lua脚本，每次对锁key的hash数据结构中filed值减1，发现该vaule值为0，则执行删除锁key命令
+ ### 缺点
+ 当redis主节点宕机时，可能会导致多个客户端同时完成加锁
+
+## 2.3 基于Redisson实现分布式锁-RedissonRedLock
+
+在分布式环境中,N个主节点，当且仅当大多数(N/2+1)的redis节点都获取到锁，且使用的时间小于锁失效的时间，锁才算获取成功；
+
+如果获取锁失败，客户端应该在所有的Redis实例上进行解锁(即使某些redis实例没有加锁成功)
+## 示例
+
+ public static void main(String[] args) {
+ 
+        Config config=new Config();
+        //详细配置属性,详见:https://github.com/redisson/redisson/wiki/%E7%9B%AE%E5%BD%95
+        config.useClusterServers()
+              /**
+               * 连接超时ms,
+               * 最好不要低于500ms,线上出现多起因为连接超时过短，造成大量建连引发Redis雪崩
+               */
+              .setConnectTimeout(10000)
+              /**
+               *  redis 命令相应超时ms，合理配置
+               */
+              .setTimeout(2000)
+              /**
+               * master连接最小空闲数,
+               * 保持masterConnectionMinimumIdleSize=masterConnectionMinimumIdleSize；
+               * 建议根据需要设置( qps/主节点数/ (1000/每条命令的预计耗时ms)*(3/2)),且不超过业务线程数量;
+               * 原则上不要超过50;例如： 主节点数：10,命令耗时:0.33ms, 10个连接的qps为: 10 * (1000ms/0.33ms) * 10 = 30w
+               */
+              .setMasterConnectionMinimumIdleSize(10)
+              /**
+               * master连接池大小,
+               * 保持masterConnectionMinimumIdleSize=masterConnectionMinimumIdleSize
+               */
+              .setMasterConnectionPoolSize(10)
+              // 添加多对主从作为种子节点
+              .addNodeAddress("redis://xxx:9736")
+              .addNodeAddress("redis://xxx:9736");
+
+              RedissonClient redisson= Redisson.create(config);
+              RLock lock1=redisson.getLock("lock1");
+              RLock lock2=redisson.getLock("lock2");
+              RLock lock3=redisson.getLock("lock3");
+
+              RedissonRedLock lock=new RedissonRedLock(lock1,lock2,lock3);
+
+              lock.lock();
+              try{
+                  //具体业务逻辑
+              }finally {
+                  lock.unlock();
+              }
+              
+    }
+    
+## 缺点
+ 当短时间内有大量的加锁解锁操作，会导致网络流量限制和redis的cpu过载，主要是因为redis在锁中采用的发布订阅机制进行锁的监控，消息被分发到集群中的所有节点中去。
+ 
+ redis中新增了Spin Lock(自旋锁)，采用指数回调的策略自旋获取锁而不是通过发布订阅机制
