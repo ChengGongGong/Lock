@@ -1,13 +1,42 @@
 # 1.基于zk的分布式锁
 ## 1.1 基于curator框架实现
-curator一个比较完善的ZooKeeper客户端框架，封装了一系列高级API简化ZooKeeper的操作，解决了：
+### 1.Curator
+1. curator一个比较完善的ZooKeeper客户端框架，封装了一系列高级API简化ZooKeeper的操作，解决了：
 
-  封装ZooKeeper client与ZooKeeper server之间的连接处理；
+    封装ZooKeeper client与ZooKeeper server之间的连接处理；
   
-  提供了一套Fluent风格的操作API；
+    提供了一套Fluent风格的操作API；
   
-  提供ZooKeeper各种应用场景(recipe， 比如：分布式锁服务、集群领导选举、共享计数器、缓存机制、分布式队列等)的抽象封装。
+    提供ZooKeeper各种应用场景(recipe， 比如：分布式锁服务、集群领导选举、共享计数器、缓存机制、分布式队列等)的抽象封装。
   
+2. 提供了异步接口。引入了BackgroundCallback 这个回调接口以及 CuratorListener 这个监听器，用于处理 Background 调用之后服务端返回的结果信息。
+    所有操作需要加上inBackground()。
+    
+3. 连接状态监听，提供了监听连接状态的监听器——ConnectionStateListener，主要是处理 Curator 客户端和 ZooKeeper 服务器间连接的异常情况。
+
+         短暂断开连接：zk会检测到该连接已经断开，但是服务端维护的客户端Session尚未过期，当重新连接后，由于Session没有过期能够保证连接恢复后保持正常服务。
+         长时间断开连接：session已过期，与先前session相关的watcher和临时节点都会丢失，当重新连接时，会获取到 Session 过期的相关异常，Curator 会销毁老 Session，并且创建一个新的 Session。
+                        由于老 Session 关联的数据不存在了，监听到 LOST 事件时，就可以依靠本地存储的数据恢复 Session 了。
+         ZooKeeper 通过 sessionID 唯一标识 Session，将 Session 信息存放到硬盘中，通过置客户端会话的超时时间（sessionTimeout），即使节点重启，之前未过期的 Session 仍然会存在。
+
+4. Watcher-监听机制，可以监听某个节点上发生的特定事件，例如监听节点数据变更、节点删除、子节点变更等事件。
+    当相应事件发生时，ZooKeeper 会产生一个 Watcher 事件，并且发送到客户端。
+    实现org.apache.curator.framework.api.CuratorWatcher接口，并重写其process方法。
+    checkExists()、getData()和getChildren()添加usingWatcher方法
+    
+5. Cache- ZooKeeper 服务端事件的监听
+
+        直接通过注册 Watcher 进行事件，需要反复注册Watcher，使用cache能够自动处理反复注册监听，看作是一个本地缓存视图和远程zk视图的对比过程，包括三大类：
+        NodeCache：对一个节点进行监听，监听事件包括指定节点的增删改操作，还能监听指定节点是否存在；
+        PathChildrenCache：对指定节点的一级子节点进行监听，监听事件包括子节点的增删改操作，但是不对该节点的操作监听。
+        TreeCache：综合 NodeCache 和 PathChildrenCache 的功能，还可以设置监听的深度。参考：         org.apache.dubbo.remoting.zookeeper.curator.CuratorZookeeperClient#addTargetDataListener
+### 2.curator-recipes
+      Queues：提供了多种的分布式队列解决方法，比如：权重队列、延迟队列等。在生产环境中，很少将 ZooKeeper 用作分布式队列，只适合在压力非常小的情况下，才使用该解决方案，建议适度使用
+      Counters：全局计数器是分布式系统中很常用的工具，curator-recipes 提供了 SharedCount、DistributedAtomicLong 等组件，帮助开发人员实现分布式计数器功能。
+      Locks：(java.util.concurrent.locks)，在微服务架构中，分布式锁也是一项非常基础的服务组件，curator-recipes 提供了多种基于 ZooKeeper 实现的分布式锁，满足日常工作中对分布式锁的需求。
+      Barries：curator-recipes 提供的分布式栅栏可以实现多个服务之间协同工作，具体实现有 DistributedBarrier 和 DistributedDoubleBarrier。
+      Elections：实现的主要功能是在多个参与者中选举出 Leader，然后由 Leader 节点作为操作调度、任务监控或是队列消费的执行者。curator-recipes 给出的实现是 LeaderLatch。
+
  ### 引入相关pom文件
  
     <dependency>
