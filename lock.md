@@ -29,7 +29,7 @@
         直接通过注册 Watcher 进行事件，需要反复注册Watcher，使用cache能够自动处理反复注册监听，看作是一个本地缓存视图和远程zk视图的对比过程，包括三大类：
         NodeCache：对一个节点进行监听，监听事件包括指定节点的增删改操作，还能监听指定节点是否存在；
         PathChildrenCache：对指定节点的一级子节点进行监听，监听事件包括子节点的增删改操作，但是不对该节点的操作监听。
-        TreeCache：综合 NodeCache 和 PathChildrenCache 的功能，还可以设置监听的深度。参考：         org.apache.dubbo.remoting.zookeeper.curator.CuratorZookeeperClient#addTargetDataListener
+        TreeCache：综合 NodeCache 和 PathChildrenCache 的功能，还可以设置监听的深度。参考：org.apache.dubbo.remoting.zookeeper.curator.CuratorZookeeperClient#addTargetDataListener         
 ### 2.curator-recipes
       Queues：提供了多种的分布式队列解决方法，比如：权重队列、延迟队列等。在生产环境中，很少将 ZooKeeper 用作分布式队列，只适合在压力非常小的情况下，才使用该解决方案，建议适度使用
       Counters：全局计数器是分布式系统中很常用的工具，curator-recipes 提供了 SharedCount、DistributedAtomicLong 等组件，帮助开发人员实现分布式计数器功能。
